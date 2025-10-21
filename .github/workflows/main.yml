@@ -1,0 +1,58 @@
+name: Build Metasploit 6.4.26 for Windows
+
+on:
+  push:
+    branches: [ master ]
+  pull_request:
+    branches: [ master ]
+  workflow_dispatch:  # Allows manual triggering
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        ref: 'v6.4.26'  # Pin to exact version tag
+
+    - name: Install MSYS2
+      shell: powershell
+      run: |
+        Invoke-WebRequest -Uri https://github.com/msys2/msys2-installer/releases/download/2024-07-27/msys2-x86_64-20240727.exe -OutFile msys2-installer.exe
+        .\msys2-installer.exe --accept-license --accept-tags --initial-install
+        $env:MSYSTEM = "MINGW64"
+        $env:CHERE_INVOKING = "1"
+        $env:MSYS2_PATH_TYPE = "inherit"
+        & "C:\msys64\usr\bin\bash.exe" -lc "pacman -Syu --noconfirm && pacman -S mingw-w64-x86_64-ruby git make mingw-w64-x86_64-gcc mingw-w64-x86_64-pkg-config --noconfirm"
+
+    - name: Install Bundler and Dependencies
+      shell: msys2 {0}
+      run: |
+        gem install bundler -v 2.4.10  # Compatible version for 6.4.x
+        bundle install
+
+    - name: Set up PostgreSQL (Optional for DB Testing)
+      shell: powershell
+      run: |
+        # Download and install PostgreSQL silently if needed for full build
+        choco install postgresql --params '/Password:postgres /Port:5432'  # Requires Chocolatey
+        # Configure database.yml manually if required
+
+    - name: Build Metasploit
+      shell: msys2 {0}
+      run: |
+        bundle exec rake  # Runs any build tasks if defined
+
+    - name: Package Artifacts
+      shell: powershell
+      run: |
+        Compress-Archive -Path "metasploit-framework/*" -DestinationPath "msf-6.4.26-windows.zip"
+        # Or create a custom MSI using tools like Advanced Installer if extending
+
+    - name: Upload Build Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: msf-windows-6.4.26
+        path: msf-6.4.26-windows.zip
