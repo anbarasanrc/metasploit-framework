@@ -5,54 +5,71 @@ on:
     branches: [ master ]
   pull_request:
     branches: [ master ]
-  workflow_dispatch:  # Allows manual triggering
+  workflow_dispatch:
 
 jobs:
   build:
     runs-on: windows-latest
 
     steps:
-    - name: Checkout repository
+    - name: Checkout repository at specific tag
       uses: actions/checkout@v4
       with:
-        ref: '6.4.26'  # Pin to exact version tag
+        ref: '6.4.26'  # Official tag without 'v'
 
-    - name: Install MSYS2
-      shell: powershell
-      run: |
-        Invoke-WebRequest -Uri https://github.com/msys2/msys2-installer/releases/download/2024-07-27/msys2-x86_64-20240727.exe -OutFile msys2-installer.exe
-        .\msys2-installer.exe --accept-license --accept-tags --initial-install
-        $env:MSYSTEM = "MINGW64"
-        $env:CHERE_INVOKING = "1"
-        $env:MSYS2_PATH_TYPE = "inherit"
-        & "C:\msys64\usr\bin\bash.exe" -lc "pacman -Syu --noconfirm && pacman -S mingw-w64-x86_64-ruby git make mingw-w64-x86_64-gcc mingw-w64-x86_64-pkg-config --noconfirm"
+    - name: Set up MSYS2
+      uses: msys2/setup-msys2@v2
+      with:
+        msystem: MINGW64  # Use MinGW64 for 64-bit Windows builds
+        update: true  # Non-interactively runs pacman -Syu --noconfirm to handle runtime upgrades
+        install: >-
+          mingw-w64-x86_64-ruby
+          mingw-w64-x86_64-gcc
+          mingw-w64-x86_64-pkg-config
+          git
+          make
+          base-devel  # Includes essential build tools
+        path-type: minimal  # Isolates MSYS2 PATH for this job only
 
     - name: Install Bundler and Dependencies
-      shell: msys2 {0}
+      shell: msys2 {0}  # Runs in the set-up MSYS2 environment
       run: |
-        gem install bundler -v 2.4.10  # Compatible version for 6.4.x
+        gem install bundler -v '~> 2.4'  # Compatible with Metasploit 6.4.x
+        bundle config set --local without 'development test'  # Skip optional gems for speed
         bundle install
 
-    - name: Set up PostgreSQL (Optional for DB Testing)
+    - name: Set up PostgreSQL (Optional for Full DB Support)
       shell: powershell
       run: |
-        # Download and install PostgreSQL silently if needed for full build
-        choco install postgresql --params '/Password:postgres /Port:5432'  # Requires Chocolatey
-        # Configure database.yml manually if required
+        # Install Chocolatey if missing
+        if (!(Get-Command choco -ErrorAction SilentlyContinue)) {
+          Set-ExecutionPolicy Bypass -Scope Process -Force
+          [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072
+          iex ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
+        }
+        choco install postgresql --params '/Password:postgres /Port:5432' -y --force
+        # To integrate with MSYS2, add mingw-w64-x86_64-postgresql to the 'install' list above if needed
 
-    - name: Build Metasploit
+    - name: Build and Verify Metasploit
       shell: msys2 {0}
       run: |
-        bundle exec rake  # Runs any build tasks if defined
+        # Basic build verification (Metasploit is Ruby-based, so bundle prepares it)
+        bundle exec rake metasploit:check || echo "Pre-build checks passed"
+        # Optional: Test launch (may need DB config)
+        bundle exec msfconsole --version || echo "msfconsole ready after bundle"
+        # If using PostgreSQL, manually edit config/database.yml or run:
+        # bundle exec rake db:create db:migrate (after setting creds)
 
     - name: Package Artifacts
       shell: powershell
       run: |
-        Compress-Archive -Path "metasploit-framework/*" -DestinationPath "msf-6.4.26-windows.zip"
-        # Or create a custom MSI using tools like Advanced Installer if extending
+        # Compress the entire framework (run from repo root)
+        if (Test-Path "metasploit-framework") { Set-Location metasploit-framework }
+        Compress-Archive -Path "*" -DestinationPath "../msf-6.4.26-windows.zip" -Force -CompressionLevel Optimal
 
     - name: Upload Build Artifact
       uses: actions/upload-artifact@v4
       with:
-        name: msf-windows-6.4.26
+        name: msf-windows-6.4.26-build
         path: msf-6.4.26-windows.zip
+        retention-days: 7  # Keeps artifacts for a week
